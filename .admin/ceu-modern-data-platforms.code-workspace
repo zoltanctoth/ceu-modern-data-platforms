@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "../../../dbt-zero-to-hero/courseware-dev"
+		},
+		{
+			"path": "../../ceu-dbt-assignment-repo"
 		}
 	],
 	"settings": {}
