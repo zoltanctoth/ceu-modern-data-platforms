@@ -6,7 +6,7 @@
 }}
 
 WITH src_reviews AS (
-  SELECT * FROM {{ ref('src_reviews') }}
+  SELECT *, current_timestamp() AS loaded_at FROM {{ ref('src_reviews') }}
 )
 SELECT * 
 FROM src_reviews

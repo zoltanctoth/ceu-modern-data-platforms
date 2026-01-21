@@ -306,6 +306,40 @@ dbt run --full-refresh
 ```
 
 ---
+## Logs
+
+Take a look at the `logs` folder (in the `airbnb` folder) to see what SQLs were executed.
+
+Also take a look at:
+
+ * `target/compiled`
+ * `target/run`
+
+---
+
+---
+### A loaded_at fields
+
+It's always a good idea to add a `loaded_at` field the stores the time of record creation to fct_reviews
+
+In `fct_reviews`, change
+```
+  SELECT *, current_timestamp()() AS loaded_at FROM {{ ref('src_reviews') }} -- Adding loaded_at column
+```
+
+Then materialize only this model:
+```
+dbt run --full-refresh --select fct_reviews
+```
+
+## Visualizing our graph
+Execute:
+```
+dbt docs generate
+dbt docs serve
+```
+
+---
 
 ## Source Freshness Testing
 
@@ -315,7 +349,7 @@ Add freshness configuration to the `reviews` source in `models/sources.yml`:
       - name: reviews
         identifier: raw_reviews
         config:
-          loaded_at_field: date
+          loaded_at_field: load
           freshness:
             warn_after: {count: 1, period: day}
 ```
@@ -325,6 +359,10 @@ Check source freshness:
 dbt source freshness
 ```
 
+Try it with a one-minute tolerance
+```
+            warn_after: {count: 1, period: minute}
+```
 ---
 
 ## Cleansed Models
@@ -357,6 +395,11 @@ SELECT
   updated_at
 FROM
   src_listings
+```
+
+Materialize only `dim` models: _(`-s` is short for `--select`)
+```
+dbt run -s dim
 ```
 
 ### Exercise 4: DIM Hosts Cleansed
@@ -434,6 +477,16 @@ LEFT JOIN h ON (h.host_id = l.host_id)
 
 </details>
 
+### Exercise 6
+Take a look at your pipeline by generating the docs and starting the docs server 
+<details>
+<summary>Solution</summary>
+```
+dbt docs generate
+dbt docs serve
+```
+</details>
+
 ---
 
 ## Materializations
@@ -473,3 +526,197 @@ WITH
 l AS (
 ...
 ```
+
+## Seeds
+
+Sometimes you have smaller datasets that are not added to Snowflake by external systems and you want to add them manually. _Seeds_ are here to the rescue:
+
+1) Explore the `seed` folder
+2) Run `dbt seeds`
+3) Check for the table on the snowflake UI
+
+### Exercise: Full Moon Reviews Mart
+
+Create a mart model that analyzes whether reviews were written during a full moon. This exercise combines your `fct_reviews` model with the `seed_full_moon_dates` seed data.
+
+**Task:** Create `models/mart/mart_fullmoon_reviews.sql` that:
+
+1. References both `fct_reviews` and `seed_full_moon_dates` using the `{{ ref() }}` function
+2. Joins reviews with full moon dates to determine if each review was written the day after a full moon
+3. Adds a new column `is_full_moon` that contains:
+   - `'full moon'` if the review was written the day after a full moon
+   - `'not full moon'` otherwise
+4. Configure the model as a `table` materialization
+
+**Hints:**
+- Use CTEs to reference each model separately
+- Snowflake date functions you'll need:
+  - `TO_DATE(timestamp_column)` - Converts a timestamp to a date (strips the time component)
+  - `DATEADD(DAY, 1, date_column)` - Adds 1 day to a date (we want reviews from the day *after* the full moon)
+- The join condition should match the review date with the day after the full moon date
+
+**Validation:** After running `dbt run --select mart_fullmoon_reviews`, query the result in Snowflake:
+```sql
+SELECT is_full_moon, COUNT(*) as review_count
+FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS
+GROUP BY is_full_moon;
+```
+
+<details>
+<summary>Solution</summary>
+
+```sql
+{{ config(
+  materialized = 'table',
+) }}
+
+WITH fct_reviews AS (
+    SELECT * FROM {{ ref('fct_reviews') }}
+),
+full_moon_dates AS (
+    SELECT * FROM {{ ref('seed_full_moon_dates') }}
+)
+
+SELECT
+  r.*,
+  CASE
+    WHEN fm.full_moon_date IS NULL THEN 'not full moon'
+    ELSE 'full moon'
+  END AS is_full_moon
+FROM
+  fct_reviews
+  r
+  LEFT JOIN full_moon_dates
+  fm
+  ON (TO_DATE(r.review_date) = DATEADD(DAY, 1, fm.full_moon_date))
+```
+
+</details>
+
+### Exercise: Full Moon Sentiment Analysis
+
+Create an **analysis** to investigate whether full moons affect review sentiment. Analyses are SQL files in the `analyses/` folder that are compiled but not materialized - they're useful for ad-hoc queries and reporting.
+
+**Task:** Create `analyses/fullmoon_sentiment.sql` that:
+
+1. References the `mart_fullmoon_reviews` model
+2. Filters out neutral sentiments (only keep `'positive'` and `'negative'`)
+3. For each `is_full_moon` category, calculate:
+   - `positive_count` - number of positive reviews
+   - `total_count` - total number of reviews (positive + negative)
+   - `positive_percentage` - percentage of positive reviews (e.g., 85.5 for 85.5%)
+4. Returns two rows: one for `'full moon'` and one for `'not full moon'`
+
+**Hints:**
+- Use conditional aggregation: `SUM(CASE WHEN condition THEN 1 ELSE 0 END)` counts matching rows
+- Snowflake integer division truncates decimals - multiply by `100.0` to get a percentage
+- Use `ROUND(value, 2)` to round to 2 decimal places for cleaner output
+
+**Run the analysis:**
+```sh
+dbt show --select fullmoon_sentiment
+```
+
+<details>
+<summary>Solution</summary>
+
+```sql
+WITH fullmoon_reviews AS (
+    SELECT * FROM {{ ref('mart_fullmoon_reviews') }}
+)
+SELECT
+    is_full_moon,
+    SUM(CASE WHEN review_sentiment = 'positive' THEN 1 ELSE 0 END) AS positive_count,
+    COUNT(*) AS total_count,
+    ROUND(SUM(CASE WHEN review_sentiment = 'positive' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS positive_percentage
+FROM
+    fullmoon_reviews
+WHERE
+    review_sentiment != 'neutral'
+GROUP BY
+    is_full_moon
+ORDER BY
+    is_full_moon
+```
+
+</details>
+
+---
+
+## Snapshots
+Snapshots implement tracking of slowly changing dimensions: (see [Slowly changing dimension — Type 2 (SCD2)](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2))
+
+## Snapshots for listing
+The contents of `snapshots/snapshots.yml`:
+```yaml
+snapshots:
+  - name: scd_raw_listings
+    relation: source('airbnb', 'listings')
+    config:
+      unique_key: id
+      strategy: timestamp
+      updated_at: updated_at
+      hard_deletes: invalidate
+```
+
+Materialize the snapshot:
+```
+dbt snapshot
+```
+
+Take a look at a single record:
+```
+SELECT * FROM AIRBNB.DEV.SCD_RAW_LISTINGS WHERE ID=3176;
+```
+
+### Updating the table
+```sql
+SELECT * FROM AIRBNB.RAW.RAW_LISTINGS WHERE ID=3176;
+```
+
+```sql
+UPDATE AIRBNB.RAW.RAW_LISTINGS SET MINIMUM_NIGHTS=30,
+    updated_at=CURRENT_TIMESTAMP() WHERE ID=3176;
+```
+
+```sql
+SELECT * FROM AIRBNB.RAW.RAW_LISTINGS WHERE ID=3176;
+```
+
+Run `dbt snapshot` again
+
+Let's see the changes:
+```
+SELECT * FROM AIRBNB.DEV.SCD_RAW_LISTINGS WHERE ID=3176;
+```
+
+
+### Building everything with the same command
+```
+dbt build
+```
+
+### Exercise
+1) Create a snapshot for `raw_hosts`
+2) run it
+3) update raw_hosts
+4) run snapshot again
+5) validate the change in the snapshot
+<details>
+<summary>Solution</summary>
+
+Add this to `snapshots/snapshots.yml`:
+```yaml
+snapshots:
+  - name: scd_raw_hosts
+    relation: source('airbnb', 'hosts')
+    config:
+      unique_key: id
+      strategy: timestamp
+      updated_at: updated_at
+      hard_deletes: invalidate
+```
+</details>
+
+## Tests
+

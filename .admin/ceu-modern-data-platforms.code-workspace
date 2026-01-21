@@ -14,6 +14,9 @@
 		},
 		{
 			"path": "../../ceu-dbt-assignment-repo"
+		},
+		{
+			"path": "../../../base-infra"
 		}
 	],
 	"settings": {}
